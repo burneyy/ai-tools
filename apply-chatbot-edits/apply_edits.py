@@ -14,10 +14,10 @@ An empty SEARCH section creates the file (or appends to it if it exists).
 All edits are checked first; if any block fails, nothing is written.
 
 Usage (run from the project root):
+    python apply_edits.py --clipboard          # read the reply from the clipboard
     python apply_edits.py reply.md
     python apply_edits.py < reply.md
-    pbpaste | python apply_edits.py            # macOS clipboard
-    python apply_edits.py --dry-run reply.md   # check only
+    python apply_edits.py --dry-run -c         # check only
 """
 import argparse
 import re
@@ -83,14 +83,37 @@ def find(content, search):
     return start, start + sum(len(l) for l in lines[hits[0]:hits[0] + n])
 
 
+def read_clipboard():
+    """Read text from the system clipboard via tkinter (standard library)."""
+    try:
+        import tkinter
+    except ImportError:
+        sys.exit("--clipboard needs tkinter, which this Python lacks. Save the reply to a file instead.")
+    root = tkinter.Tk()
+    root.withdraw()
+    try:
+        return root.clipboard_get()
+    except tkinter.TclError:
+        sys.exit("The clipboard is empty or doesn't contain text.")
+    finally:
+        root.destroy()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("reply", nargs="?", help="file with the chatbot reply (default: stdin)")
+    ap.add_argument("-c", "--clipboard", action="store_true", help="read the reply from the clipboard")
     ap.add_argument("-n", "--dry-run", action="store_true", help="check edits, write nothing")
     args = ap.parse_args()
 
-    text = Path(args.reply).read_text(encoding="utf-8") if args.reply else sys.stdin.read()
+    if args.clipboard:
+        text = read_clipboard()
+    elif args.reply:
+        text = Path(args.reply).read_text(encoding="utf-8")
+    else:
+        text = sys.stdin.read()
+    text = text.removeprefix("\ufeff")  # files saved by Windows tools may start with a BOM
     edits = parse(text.replace("\r\n", "\n"))
     if not edits:
         sys.exit("No SEARCH/REPLACE blocks found.")
