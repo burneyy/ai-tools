@@ -12,10 +12,10 @@ Before writing any code:
 - If the task is ambiguous, or you need a file that isn't included, stop and ask instead of guessing.
 - Give a short plan: which files you'll change or create, and why.
 
-Then output every change as SEARCH/REPLACE blocks. Put each block in its own code fence, preceded by a FILE line with the path relative to the project root:
+Then output ALL changes, for all files, in ONE single code block, so I can copy them with one click. Inside it, start each change with a FILE line giving the path relative to the project root, followed by a SEARCH/REPLACE block:
 
-### FILE: src/utils/math.py
 ```
+### FILE: src/utils/math.py
 <<<<<<< SEARCH
 def add(a, b):
     return a + b
@@ -24,7 +24,16 @@ def add(a, b):
     """Return the sum of a and b."""
     return a + b
 >>>>>>> REPLACE
+
+### FILE: src/utils/strings.py
+<<<<<<< SEARCH
+=======
+def shout(s):
+    return s.upper()
+>>>>>>> REPLACE
 ```
+
+Put nothing else inside that code block: your plan goes before it and any notes go after it. If any of the changed code itself contains ``` lines, open and close the block with ```` (four backticks) instead.
 
 Rules for the blocks:
 - SEARCH must be copied character for character from the current file, including indentation and comments. Never paraphrase or shorten it.
