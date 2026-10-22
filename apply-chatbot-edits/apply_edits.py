@@ -68,11 +68,15 @@ def parse(text):
 
 
 def find(content, search):
-    """Locate the unique match of `search`: exact first, then ignoring trailing whitespace."""
+    """Locate the unique match of `search` and return (start, end, how).
+
+    Tries, in order: an exact match; a match ignoring trailing whitespace;
+    a match ignoring blank lines (every non-blank line must still match exactly).
+    """
     count = content.count(search)
     if count == 1:
         i = content.index(search)
-        return i, i + len(search)
+        return i, i + len(search), "exact"
     if count > 1:
         raise ValueError(f"SEARCH text matches {count} places; needs more context lines")
 
@@ -83,10 +87,33 @@ def find(content, search):
             if [l.rstrip() for l in lines[k:k + n]] == target]
     if len(hits) > 1:
         raise ValueError(f"SEARCH text matches {len(hits)} places; needs more context lines")
+    if hits:
+        start = sum(len(l) for l in lines[:hits[0]])
+        return start, start + sum(len(l) for l in lines[hits[0]:hits[0] + n]), "whitespace"
+
+    # Last resort: ignore blank lines, which models often drop or add.
+    nonblank = [(k, l.rstrip()) for k, l in enumerate(lines) if l.strip()]
+    wanted = [t for t in target if t.strip()]
+    m = len(wanted)
+    hits = [j for j in range(len(nonblank) - m + 1)
+            if [t for _, t in nonblank[j:j + m]] == wanted]
+    if len(hits) > 1:
+        raise ValueError(f"SEARCH text matches {len(hits)} places; needs more context lines")
     if not hits:
         raise ValueError("SEARCH text not found in file")
-    start = sum(len(l) for l in lines[:hits[0]])
-    return start, start + sum(len(l) for l in lines[hits[0]:hits[0] + n])
+    first, last = nonblank[hits[0]][0], nonblank[hits[0] + m - 1][0]
+    start = sum(len(l) for l in lines[:first])
+    return start, start + sum(len(l) for l in lines[first:last + 1]), "blank-lines"
+
+
+def trim_blank_edges(text):
+    """Drop leading and trailing blank lines."""
+    lines = text.splitlines(keepends=True)
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "".join(lines)
 
 
 def read_clipboard():
@@ -125,7 +152,7 @@ def main():
         sys.exit("No SEARCH/REPLACE blocks found.")
 
     root = Path.cwd().resolve()
-    files, errors = {}, []  # files: path -> [content, uses_crlf, is_new]
+    files, errors, notes = {}, [], []  # files: path -> [content, uses_crlf, is_new]
 
     for path, search, replace, line_no in edits:
         p = (root / path).resolve()
@@ -149,7 +176,12 @@ def main():
             elif content is None:
                 raise ValueError("file does not exist")
             else:
-                s, e = find(content, search)
+                s, e, how = find(content, search)
+                if how == "blank-lines":
+                    # the match starts and ends on non-blank lines, so the file's own
+                    # surrounding blank lines stay; don't add the model's on top
+                    replace = trim_blank_edges(replace)
+                    notes.append(f"{path} (block at line {line_no}): matched ignoring blank lines")
                 files[p][0] = content[:s] + replace + content[e:]
         except ValueError as err:
             errors.append(f"{path} (block at line {line_no}): {err}")
@@ -166,6 +198,10 @@ def main():
             p.parent.mkdir(parents=True, exist_ok=True)
             with open(p, "w", encoding="utf-8", newline="") as f:
                 f.write(content.replace("\n", "\r\n") if crlf else content)
+    if notes:
+        print("Check these in the diff:")
+        for n in notes:
+            print("  " + n)
     if args.dry_run:
         print("(dry run, nothing written)")
 

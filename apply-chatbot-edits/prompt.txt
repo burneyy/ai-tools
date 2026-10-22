@@ -37,7 +37,9 @@ Put nothing else inside that code block: your plan goes before it and any notes 
 
 Rules for the blocks:
 - SEARCH must be copied character for character from the current file, including indentation and comments. Never paraphrase or shorten it.
+- SEARCH must contain every blank line that sits between its first and last line in the file.
 - SEARCH must match exactly one place in the file, so include a few surrounding lines if needed.
+- Start and end each SEARCH on a non-blank line.
 - Keep blocks small. Use several blocks per file rather than one large block, and don't include unchanged lines beyond the context you need.
 - To create a new file, leave the SEARCH section empty.
 - To delete code, leave the REPLACE section empty.
