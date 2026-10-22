@@ -24,28 +24,34 @@ import re
 import sys
 from pathlib import Path
 
-FILE_RE = re.compile(r"^#{1,6}\s*FILE:\s*(.+?)\s*$")
-SEARCH_RE = re.compile(r"^<{5,9} ?SEARCH\s*$")
-DIVIDER_RE = re.compile(r"^={5,9}\s*$")
-REPLACE_RE = re.compile(r"^>{5,9} ?REPLACE\s*$")
+FILE_RE = re.compile(r"^\s*#{1,6}\s*FILE:\s*(.+?)\s*$")
+SEARCH_RE = re.compile(r"^([ \t]*)<{5,9} ?SEARCH\s*$")
+DIVIDER_RE = re.compile(r"^\s*={5,9}\s*$")
+REPLACE_RE = re.compile(r"^\s*>{5,9} ?REPLACE\s*$")
 
 
 def parse(text):
     """Return a list of (path, search, replace, line_no) tuples."""
     edits, current_file, state = [], None, None
-    search, replace, start = [], [], 0
+    search, replace, start, indent = [], [], 0, ""
     for i, line in enumerate(text.splitlines(keepends=True), 1):
         bare = line.rstrip("\n")
         if state is None:
             m = FILE_RE.match(bare)
+            s = SEARCH_RE.match(bare)
             if m:
                 current_file = m.group(1).strip("`'\" ")
-            elif SEARCH_RE.match(bare):
+            elif s:
                 if current_file is None:
                     sys.exit(f"line {i}: SEARCH block before any FILE header")
                 state, search, replace, start = "search", [], [], i
+                indent = s.group(1)  # if the block is indented, strip that from its lines
             # anything else (prose, code fences) is ignored
-        elif state == "search":
+            continue
+        if indent and line.startswith(indent):
+            line = line[len(indent):]
+            bare = line.rstrip("\n")
+        if state == "search":
             if DIVIDER_RE.match(bare):
                 state = "replace"
             else:
