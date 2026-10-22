@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Apply SEARCH/REPLACE edit blocks from a chatbot reply to files on disk.
+
+Expected format (any number of blocks, several per file is fine):
+
+    ### FILE: src/foo.py
+    <<<<<<< SEARCH
+    exact existing lines
+    =======
+    replacement lines
+    >>>>>>> REPLACE
+
+An empty SEARCH section creates the file (or appends to it if it exists).
+All edits are checked first; if any block fails, nothing is written.
+
+Usage (run from the project root):
+    python apply_edits.py reply.md
+    python apply_edits.py < reply.md
+    pbpaste | python apply_edits.py            # macOS clipboard
+    python apply_edits.py --dry-run reply.md   # check only
+"""
+import argparse
+import re
+import sys
+from pathlib import Path
+
+FILE_RE = re.compile(r"^#{1,6}\s*FILE:\s*(.+?)\s*$")
+SEARCH_RE = re.compile(r"^<{5,9} ?SEARCH\s*$")
+DIVIDER_RE = re.compile(r"^={5,9}\s*$")
+REPLACE_RE = re.compile(r"^>{5,9} ?REPLACE\s*$")
+
+
+def parse(text):
+    """Return a list of (path, search, replace, line_no) tuples."""
+    edits, current_file, state = [], None, None
+    search, replace, start = [], [], 0
+    for i, line in enumerate(text.splitlines(keepends=True), 1):
+        bare = line.rstrip("\n")
+        if state is None:
+            m = FILE_RE.match(bare)
+            if m:
+                current_file = m.group(1).strip("`'\" ")
+            elif SEARCH_RE.match(bare):
+                if current_file is None:
+                    sys.exit(f"line {i}: SEARCH block before any FILE header")
+                state, search, replace, start = "search", [], [], i
+            # anything else (prose, code fences) is ignored
+        elif state == "search":
+            if DIVIDER_RE.match(bare):
+                state = "replace"
+            else:
+                search.append(line)
+        else:  # state == "replace"
+            if REPLACE_RE.match(bare):
+                edits.append((current_file, "".join(search), "".join(replace), start))
+                state = None
+            else:
+                replace.append(line)
+    if state is not None:
+        sys.exit(f"line {start}: block never closed (reply truncated?)")
+    return edits
+
+
+def find(content, search):
+    """Locate the unique match of `search`: exact first, then ignoring trailing whitespace."""
+    count = content.count(search)
+    if count == 1:
+        i = content.index(search)
+        return i, i + len(search)
+    if count > 1:
+        raise ValueError(f"SEARCH text matches {count} places; needs more context lines")
+
+    lines = content.splitlines(keepends=True)
+    target = [l.rstrip() for l in search.splitlines()]
+    n = len(target)
+    hits = [k for k in range(len(lines) - n + 1)
+            if [l.rstrip() for l in lines[k:k + n]] == target]
+    if len(hits) > 1:
+        raise ValueError(f"SEARCH text matches {len(hits)} places; needs more context lines")
+    if not hits:
+        raise ValueError("SEARCH text not found in file")
+    start = sum(len(l) for l in lines[:hits[0]])
+    return start, start + sum(len(l) for l in lines[hits[0]:hits[0] + n])
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("reply", nargs="?", help="file with the chatbot reply (default: stdin)")
+    ap.add_argument("-n", "--dry-run", action="store_true", help="check edits, write nothing")
+    args = ap.parse_args()
+
+    text = Path(args.reply).read_text(encoding="utf-8") if args.reply else sys.stdin.read()
+    edits = parse(text.replace("\r\n", "\n"))
+    if not edits:
+        sys.exit("No SEARCH/REPLACE blocks found.")
+
+    root = Path.cwd().resolve()
+    files, errors = {}, []  # files: path -> [content, uses_crlf, is_new]
+
+    for path, search, replace, line_no in edits:
+        p = (root / path).resolve()
+        if root not in p.parents:
+            errors.append(f"{path}: outside the project folder")
+            continue
+        if p not in files:
+            if p.exists():
+                with open(p, encoding="utf-8", newline="") as f:
+                    raw = f.read()
+                files[p] = [raw.replace("\r\n", "\n"), "\r\n" in raw, False]
+            else:
+                files[p] = [None, False, True]
+
+        content = files[p][0]
+        try:
+            if not search.strip():  # create or append
+                if content and not content.endswith("\n"):
+                    content += "\n"
+                files[p][0] = (content or "") + replace
+            elif content is None:
+                raise ValueError("file does not exist")
+            else:
+                s, e = find(content, search)
+                files[p][0] = content[:s] + replace + content[e:]
+        except ValueError as err:
+            errors.append(f"{path} (block at line {line_no}): {err}")
+
+    if errors:
+        print("Nothing written. Problems:", file=sys.stderr)
+        for e in errors:
+            print("  " + e, file=sys.stderr)
+        sys.exit(1)
+
+    for p, (content, crlf, is_new) in files.items():
+        print(f"{'create' if is_new else 'edit  '}  {p.relative_to(root)}")
+        if not args.dry_run:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "w", encoding="utf-8", newline="") as f:
+                f.write(content.replace("\n", "\r\n") if crlf else content)
+    if args.dry_run:
+        print("(dry run, nothing written)")
+
+
+if __name__ == "__main__":
+    main()

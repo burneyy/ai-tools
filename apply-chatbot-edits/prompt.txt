@@ -1,0 +1,39 @@
+<codebase>
+{paste your generated markdown here}
+</codebase>
+
+You are working on the codebase above.
+
+<task>
+{describe the feature}
+</task>
+
+Before writing any code:
+- If the task is ambiguous, or you need a file that isn't included, stop and ask instead of guessing.
+- Give a short plan: which files you'll change or create, and why.
+
+Then output every change as SEARCH/REPLACE blocks. Put each block in its own code fence, preceded by a FILE line with the path relative to the project root:
+
+### FILE: src/utils/math.py
+```
+<<<<<<< SEARCH
+def add(a, b):
+    return a + b
+=======
+def add(a, b):
+    """Return the sum of a and b."""
+    return a + b
+>>>>>>> REPLACE
+```
+
+Rules for the blocks:
+- SEARCH must be copied character for character from the current file, including indentation and comments. Never paraphrase or shorten it.
+- SEARCH must match exactly one place in the file, so include a few surrounding lines if needed.
+- Keep blocks small. Use several blocks per file rather than one large block, and don't include unchanged lines beyond the context you need.
+- To create a new file, leave the SEARCH section empty.
+- To delete code, leave the REPLACE section empty.
+- Never output full files.
+
+Don't touch code unrelated to the task, and match the existing style.
+
+After the blocks, list anything I need to do by hand, such as new dependencies, config changes, or migrations.
