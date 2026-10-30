@@ -10,8 +10,12 @@ Expected format (any number of blocks, several per file is fine):
     replacement lines
     >>>>>>> REPLACE
 
+    ### DELETE: src/old.py
+    ### RENAME: src/utils.py -> src/helpers/utils.py
+
 An empty SEARCH section creates the file (or appends to it if it exists).
-All edits are checked first; if any block fails, nothing is written.
+Steps apply in order, so edits after a RENAME use the new path.
+All steps are checked first; if any fails, nothing is written.
 
 Usage (run from the project root):
     python apply_edits.py --clipboard          # read the reply from the clipboard
@@ -20,30 +24,48 @@ Usage (run from the project root):
     python apply_edits.py --dry-run -c         # check only
 """
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
 FILE_RE = re.compile(r"^\s*#{1,6}\s*FILE:\s*(.+?)\s*$")
+DELETE_RE = re.compile(r"^\s*#{1,6}\s*DELETE:\s*(.+?)\s*$")
+RENAME_RE = re.compile(r"^\s*#{1,6}\s*RENAME:\s*(.+?)\s*->\s*(.+?)\s*$")
 SEARCH_RE = re.compile(r"^([ \t]*)<{5,9} ?SEARCH\s*$")
 DIVIDER_RE = re.compile(r"^\s*={5,9}\s*$")
 REPLACE_RE = re.compile(r"^\s*>{5,9} ?REPLACE\s*$")
 
 
+def clean(path):
+    return path.strip("`'\" ")
+
+
 def parse(text):
-    """Return a list of (path, search, replace, line_no) tuples."""
-    edits, current_file, state = [], None, None
+    """Return a list of steps, in reply order:
+    ("edit", line_no, path, search, replace), ("delete", line_no, path)
+    or ("rename", line_no, old_path, new_path).
+    """
+    steps, current_file, state = [], None, None
     search, replace, start, indent = [], [], 0, ""
     for i, line in enumerate(text.splitlines(keepends=True), 1):
         bare = line.rstrip("\n")
         if state is None:
             m = FILE_RE.match(bare)
+            d = DELETE_RE.match(bare)
+            r = RENAME_RE.match(bare)
             s = SEARCH_RE.match(bare)
             if m:
-                current_file = m.group(1).strip("`'\" ")
+                current_file = clean(m.group(1))
+            elif d:
+                steps.append(("delete", i, clean(d.group(1))))
+                current_file = None  # a following block needs its own FILE line
+            elif r:
+                steps.append(("rename", i, clean(r.group(1)), clean(r.group(2))))
+                current_file = None
             elif s:
                 if current_file is None:
-                    sys.exit(f"line {i}: SEARCH block before any FILE header")
+                    sys.exit(f"line {i}: SEARCH block without a FILE header")
                 state, search, replace, start = "search", [], [], i
                 indent = s.group(1)  # if the block is indented, strip that from its lines
             # anything else (prose, code fences) is ignored
@@ -58,13 +80,13 @@ def parse(text):
                 search.append(line)
         else:  # state == "replace"
             if REPLACE_RE.match(bare):
-                edits.append((current_file, "".join(search), "".join(replace), start))
+                steps.append(("edit", start, current_file, "".join(search), "".join(replace)))
                 state = None
             else:
                 replace.append(line)
     if state is not None:
         sys.exit(f"line {start}: block never closed (reply truncated?)")
-    return edits
+    return steps
 
 
 def find(content, search):
@@ -116,6 +138,28 @@ def trim_blank_edges(text):
     return "".join(lines)
 
 
+def resolve(root, path):
+    """Absolute path for `path`, or ValueError if it leaves the project folder."""
+    p = (root / path).resolve()
+    if root not in p.parents:
+        raise ValueError(f"{path}: outside the project folder")
+    # On Windows, resolve() returns an existing file's on-disk spelling;
+    # keep the requested one so that case-only renames work.
+    name = Path(path).name
+    return p.with_name(name) if name.lower() == p.name.lower() else p
+
+
+def write(p, content, crlf):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8", newline="") as f:
+        f.write(content.replace("\n", "\r\n") if crlf else content)
+
+
+def move(src, dst):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(src, dst)  # also handles case-only renames on Windows
+
+
 def read_clipboard():
     """Read text from the system clipboard via tkinter (standard library)."""
     try:
@@ -146,45 +190,65 @@ def main():
         text = Path(args.reply).read_text(encoding="utf-8")
     else:
         text = sys.stdin.read()
-    text = text.removeprefix("\ufeff")  # files saved by Windows tools may start with a BOM
-    edits = parse(text.replace("\r\n", "\n"))
-    if not edits:
-        sys.exit("No SEARCH/REPLACE blocks found.")
+    text = text.removeprefix("﻿")  # files saved by Windows tools may start with a BOM
+    steps = parse(text.replace("\r\n", "\n"))
+    if not steps:
+        sys.exit("No SEARCH/REPLACE blocks, DELETE or RENAME lines found.")
 
     root = Path.cwd().resolve()
-    files, errors, notes = {}, [], []  # files: path -> [content, uses_crlf, is_new]
+    # files: path -> [content (None if absent), uses_crlf, on_disk, changed]
+    files, moves, errors, notes = {}, [], [], []
 
-    for path, search, replace, line_no in edits:
-        p = (root / path).resolve()
-        if root not in p.parents:
-            errors.append(f"{path}: outside the project folder")
-            continue
+    def load(p):
         if p not in files:
             if p.exists():
                 with open(p, encoding="utf-8", newline="") as f:
                     raw = f.read()
-                files[p] = [raw.replace("\r\n", "\n"), "\r\n" in raw, False]
+                files[p] = [raw.replace("\r\n", "\n"), "\r\n" in raw, True, False]
             else:
-                files[p] = [None, False, True]
+                files[p] = [None, False, False, False]
+        return files[p]
 
-        content = files[p][0]
+    for kind, line_no, path, *rest in steps:
         try:
-            if not search.strip():  # create or append
-                if content and not content.endswith("\n"):
-                    content += "\n"
-                files[p][0] = (content or "") + replace
-            elif content is None:
+            p = resolve(root, path)
+            entry = load(p)
+            if entry[0] is None and (kind != "edit" or rest[0].strip()):
                 raise ValueError("file does not exist")
+            if kind == "delete":
+                entry[0] = None
+            elif kind == "rename":
+                new = resolve(root, rest[0])
+                # A case-only rename (Foo.py -> foo.py) names the same file. Windows paths
+                # compare equal; on macOS ask the disk, if this reply hasn't touched `new`.
+                same = new == p or (new not in files and p.exists() and new.exists()
+                                    and os.path.samefile(p, new))
+                if not same and load(new)[0] is not None:
+                    raise ValueError(f"{rest[0]} already exists")
+                if entry[2]:
+                    moves.append((p, new))
+                del files[p]
+                files[new] = entry
+                if not same:
+                    files[p] = [None, False, False, False]
             else:
-                s, e, how = find(content, search)
-                if how == "blank-lines":
-                    # the match starts and ends on non-blank lines, so the file's own
-                    # surrounding blank lines stay; don't add the model's on top
-                    replace = trim_blank_edges(replace)
-                    notes.append(f"{path} (block at line {line_no}): matched ignoring blank lines")
-                files[p][0] = content[:s] + replace + content[e:]
+                search, replace = rest
+                content = entry[0]
+                if not search.strip():  # create or append
+                    if content and not content.endswith("\n"):
+                        content += "\n"
+                    entry[0] = (content or "") + replace
+                else:
+                    s, e, how = find(content, search)
+                    if how == "blank-lines":
+                        # the match starts and ends on non-blank lines, so the file's own
+                        # surrounding blank lines stay; don't add the model's on top
+                        replace = trim_blank_edges(replace)
+                        notes.append(f"{path} (block at line {line_no}): matched ignoring blank lines")
+                    entry[0] = content[:s] + replace + content[e:]
+                entry[3] = True
         except ValueError as err:
-            errors.append(f"{path} (block at line {line_no}): {err}")
+            errors.append(f"{path} (line {line_no}): {err}")
 
     if errors:
         print("Nothing written. Problems:", file=sys.stderr)
@@ -192,12 +256,25 @@ def main():
             print("  " + e, file=sys.stderr)
         sys.exit(1)
 
-    for p, (content, crlf, is_new) in files.items():
-        print(f"{'create' if is_new else 'edit  '}  {p.relative_to(root)}")
+    # Renames first (later writes go to the new paths), deletes last.
+    rel = lambda p: p.relative_to(root)
+    actions = [(f"rename  {rel(a)} -> {rel(b)}", move, a, b) for a, b in moves]
+    deletes = []
+    for p, (content, crlf, on_disk, changed) in files.items():
+        if content is not None and changed:
+            actions.append((f"{'edit  ' if on_disk else 'create'}  {rel(p)}", write, p, content, crlf))
+        elif content is None and on_disk:
+            deletes.append((f"delete  {rel(p)}", os.remove, p))
+
+    for label, act, *act_args in actions + deletes:
+        print(label)
         if not args.dry_run:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            with open(p, "w", encoding="utf-8", newline="") as f:
-                f.write(content.replace("\n", "\r\n") if crlf else content)
+            try:
+                act(*act_args)
+            except OSError as err:
+                hint = " Is the file open in another program, or read-only?" if isinstance(err, PermissionError) else ""
+                sys.exit(f"FAILED: {err}.{hint}\n"
+                         "The steps listed before this one were done; this one and the rest were not.")
     if notes:
         print("Check these in the diff:")
         for n in notes:

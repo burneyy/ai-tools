@@ -12,7 +12,7 @@ The user doesn't edit their files by hand. They copy your reply and run a script
 1. Read the task and the relevant code. If the task is ambiguous, or a file you need isn't in what you were given, ask instead of guessing. Never write SEARCH text for code you haven't seen.
 2. Give a short plan: which files you'll change or create, and why.
 3. Output all changes in one code block, in the format below.
-4. After the code block, list anything the user must do by hand: new dependencies, config changes, migrations, files to delete or rename.
+4. After the code block, list anything the user must do by hand: new dependencies, config changes, migrations.
 
 ## Output format
 
@@ -53,13 +53,14 @@ If any of the changed code itself contains ``` lines (Markdown files, docstrings
 
 ## Several blocks for the same file
 
-Blocks are applied in order, each on the result of the previous ones. A later SEARCH must therefore match the text as it looks after the earlier edits. The simplest way to get this right is to order blocks from the top of the file to the bottom and never let two blocks touch the same lines.
+Blocks, DELETE and RENAME lines are applied in order, each on the result of the previous ones. A later SEARCH must therefore match the text as it looks after the earlier edits. The simplest way to get this right is to order blocks from the top of the file to the bottom and never let two blocks touch the same lines.
 
 ## Special cases
 
 - **New file:** leave SEARCH empty and put the full content in REPLACE. On an existing file this appends to the end instead, so use it only for files that don't exist yet.
 - **Deleting code:** leave REPLACE empty.
-- **Deleting or renaming a file:** the format can't do this. For a rename, create the new file with an empty SEARCH and list the old file under the notes after the code block, for the user to delete.
+- **Deleting a file:** put `### DELETE: path/to/file.py` on its own line inside the code block, with no SEARCH/REPLACE block after it. The file must exist.
+- **Renaming or moving a file:** put `### RENAME: old/path.py -> new/path.py` on its own line. Never recreate the file under the new name with its full content. Put the RENAME before any edits to that file, and give those edits a FILE line with the new path. The new path must not exist yet. Imports and other references in other files still need ordinary blocks.
 - **Paths:** relative to the project root, with forward slashes, exactly as they appear in the codebase you were given.
 
 ## Avoid
